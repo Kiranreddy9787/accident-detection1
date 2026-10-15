@@ -17,6 +17,10 @@
                 <button id="cameraPicker" class="secondary-button" type="button">Connect to camera</button>
                 <button id="openRecorder" class="secondary-button" type="button">Record from camera</button>
                 <p id="selectedFile" class="selected-file" aria-live="polite">No file selected</p>
+                <div id="uploadProgress" class="upload-progress" hidden>
+                    <progress id="uploadProgressBar" max="100" value="0" aria-label="Video upload progress"></progress>
+                    <p id="uploadStatus" class="selected-file" role="status" aria-live="polite"></p>
+                </div>
                 <div class="camera-recorder" id="cameraRecorder" hidden>
                     <video id="cameraPreview" autoplay muted playsinline></video>
                     <div class="camera-actions"><button id="startRecording" class="secondary-button" type="button">Start recording</button><button id="stopRecording" class="secondary-button" type="button" disabled>Stop recording</button></div>

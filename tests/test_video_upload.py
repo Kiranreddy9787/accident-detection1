@@ -2,6 +2,7 @@ import io
 import unittest
 import uuid
 from pathlib import Path
+from unittest.mock import patch
 
 import cv2
 import numpy as np
@@ -55,6 +56,26 @@ class VideoUploadTests(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 400)
         self.assertIn(b"Use an MP4, MOV, M4V, WebM, or AVI video file.", response.data)
+
+    def test_rejects_corrupt_video_content_with_an_allowed_extension(self):
+        response = self.client.post(
+            "/upload-video",
+            data={"video": (io.BytesIO(b"this is not a video"), "traffic.avi")},
+            content_type="multipart/form-data",
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn(b"OpenCV could not open this file as a video", response.data)
+
+    def test_rejects_a_video_larger_than_the_configured_file_limit(self):
+        sample = self._sample_avi()
+        with patch("app.MAX_VIDEO_BYTES", 32):
+            response = self.client.post(
+                "/upload-video",
+                data={"video": (io.BytesIO(sample.read_bytes()), "traffic.avi")},
+                content_type="multipart/form-data",
+            )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn(b"exceeds the 500 MB file size limit", response.data)
 
     def test_upload_preview_playback_and_frame_extraction(self):
         sample = self._sample_avi()

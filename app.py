@@ -1,17 +1,17 @@
 import os
 import uuid
 import json
+import threading
 from functools import wraps
 from pathlib import Path
 
-from flask import Flask, abort, flash, redirect, render_template, request, send_from_directory, session, url_for
+from flask import Flask, abort, flash, jsonify, redirect, render_template, request, send_from_directory, session, url_for
 from werkzeug.exceptions import RequestEntityTooLarge
 from werkzeug.utils import secure_filename
 from mysql.connector import Error
 from werkzeug.security import check_password_hash, generate_password_hash
 
 import database as db
-from accident_model import AccidentModelError, classify_video_window
 from alerts import generate_alert
 from detection import DetectionError, process_video
 from event_logging import AccidentEventGrouper, EventLoggingError, capture_accident_snapshot
@@ -23,6 +23,7 @@ from video_processing import VideoProcessingError, read_video_metadata
 # WebM (browser camera recording). OpenCV validates the actual video before it
 # is accepted, so this list only controls the upload filename types we allow.
 ALLOWED_VIDEO_EXTENSIONS = {"mp4", "avi", "mov", "m4v", "webm"}
+MAX_VIDEO_BYTES = 500 * 1024 * 1024
 SERVER_SESSION_MARKER = uuid.uuid4().hex
 VIDEO_MIME_TYPES = {
     "mp4": "video/mp4",
@@ -32,6 +33,8 @@ VIDEO_MIME_TYPES = {
     "avi": "video/x-msvideo",
 }
 event_grouper = AccidentEventGrouper(cooldown_seconds=120)
+analysis_progress: dict[str, dict[str, object]] = {}
+analysis_progress_lock = threading.Lock()
 
 
 def create_app():
@@ -45,11 +48,12 @@ def create_app():
         SERVER_SESSION_MARKER=SERVER_SESSION_MARKER,
         SESSION_COOKIE_HTTPONLY=True,
         SESSION_COOKIE_SAMESITE="Lax",
-        MAX_CONTENT_LENGTH=500 * 1024 * 1024,  # 500 MB upload limit
+        # Flask counts the multipart form headers and boundaries too, so leave
+        # a small allowance above the advertised 500 MiB video-file limit.
+        MAX_CONTENT_LENGTH=501 * 1024 * 1024,
         VIDEO_UPLOAD_FOLDER=str(Path(app.root_path) / "videos"),
         PROCESSED_VIDEO_FOLDER=str(Path(app.root_path) / "videos" / "processed"),
         MODEL_FOLDER=str(Path(app.root_path) / "models"),
-        ACCIDENT_MODEL_PATH=str(Path(app.root_path) / "models" / "accident_classifier.pt"),
         SNAPSHOT_FOLDER=str(Path(app.root_path) / "snapshots"),
     )
     Path(app.config["VIDEO_UPLOAD_FOLDER"]).mkdir(parents=True, exist_ok=True)
@@ -128,8 +132,11 @@ def create_app():
             target_path = Path(app.config["VIDEO_UPLOAD_FOLDER"]) / stored_name
             try:
                 video_file.save(target_path)
-                if target_path.stat().st_size == 0:
+                file_size = target_path.stat().st_size
+                if file_size == 0:
                     raise VideoProcessingError("The uploaded file is empty.")
+                if file_size > MAX_VIDEO_BYTES:
+                    raise VideoProcessingError("The video exceeds the 500 MB file size limit.")
                 metadata = read_video_metadata(target_path)
             except (OSError, VideoProcessingError) as error:
                 target_path.unlink(missing_ok=True)
@@ -163,36 +170,85 @@ def create_app():
             return redirect(url_for("upload_video"))
 
         source_path = Path(app.config["VIDEO_UPLOAD_FOLDER"]) / selected_video["filename"]
-        processed_filename = f"detected_{Path(selected_video['filename']).stem}.mp4"
+        processed_filename = f"detected_{Path(selected_video['filename']).stem}.webm"
         output_path = Path(app.config["PROCESSED_VIDEO_FOLDER"]) / processed_filename
+
+        def record_progress(current_frame: int, total_frames: int) -> None:
+            progress = round(current_frame * 100 / total_frames) if total_frames > 0 else 0
+            with analysis_progress_lock:
+                analysis_progress[selected_video["filename"]] = {
+                    "status": "processing",
+                    "progress": min(progress, 99),
+                    "current_frame": current_frame,
+                    "total_frames": total_frames,
+                    "message": "Analyzing video frames with YOLO…",
+                }
+
+        with analysis_progress_lock:
+            if len(analysis_progress) >= 64:
+                for old_filename in list(analysis_progress)[:-63]:
+                    analysis_progress.pop(old_filename, None)
+            analysis_progress[selected_video["filename"]] = {
+                "status": "starting", "progress": 0, "current_frame": 0,
+                "total_frames": selected_video.get("frame_count", 0),
+                "message": "Loading pretrained YOLO model…",
+            }
         try:
-            result = process_video(source_path, output_path, app.config["MODEL_FOLDER"])
+            result = process_video(
+                source_path,
+                output_path,
+                app.config["MODEL_FOLDER"],
+                progress_callback=record_progress,
+            )
         except (DetectionError, OSError, ValueError) as error:
+            with analysis_progress_lock:
+                analysis_progress[selected_video["filename"]] = {
+                    "status": "failed", "progress": 0,
+                    "message": f"Analysis failed: {error}",
+                }
             app.logger.exception("Video detection processing failed")
             flash(f"Detection could not be completed: {error}", "error")
             return redirect(url_for("home"))
 
-        session["processed_video"] = {"filename": processed_filename, **result}
-        try:
-            session["accident_classification"] = classify_video_window(
-                source_path, app.config["ACCIDENT_MODEL_PATH"]
-            )
-        except AccidentModelError as error:
-            app.logger.warning("Accident classification was unavailable: %s", error)
-            session["accident_classification"] = {
-                "status": "model_error",
-                "message": f"Accident model not available: {error}",
+        with analysis_progress_lock:
+            analysis_progress[selected_video["filename"]] = {
+                "status": "complete", "progress": 100,
+                "current_frame": result.get("frame_count", 0),
+                "total_frames": result.get("frame_count", 0),
+                "message": "Video analysis complete.",
             }
 
-        classification = session["accident_classification"]
-        if classification.get("status") == "classified" and classification.get("label") == "ACCIDENT":
+        session["processed_video"] = {"filename": processed_filename, **result}
+        movement_incident = result.get("movement_incident", {"possible_incident": False})
+        classification = {
+            "status": "rule_based",
+            "label": "Possible incident — manual review required" if movement_incident.get("possible_incident") else "No possible incident flagged",
+            "possible_incident": bool(movement_incident.get("possible_incident")),
+            "method": "proximity_and_motion_rules",
+            "message": movement_incident.get("message", "Movement rules completed."),
+            "rule_score": movement_incident.get("rule_score", 0.0),
+            "peak_frame_index": movement_incident.get("frame_index"),
+            "time_seconds": movement_incident.get("time_seconds"),
+            "video_timestamp": movement_incident.get("video_timestamp"),
+            "track_ids": movement_incident.get("track_ids", []),
+            "involved_objects": movement_incident.get("involved_objects", []),
+            "signals": movement_incident.get("signals", []),
+        }
+
+        session["accident_classification"] = classification
+        if classification.get("possible_incident"):
             counts = result.get("object_counts", {})
             severity = estimate_severity(
                 vehicle_detections=sum(counts.get(name, 0) for name in ("car", "motorcycle", "bus", "truck")),
                 person_detections=counts.get("person", 0),
-                collision_indicator=classification["accident_probability"],
+                collision_indicator=classification.get("accident_probability", classification.get("rule_score", 0.65)),
                 detection_confidence=result.get("average_detection_confidence", 0.0),
             )
+            if classification.get("method") == "proximity_and_motion_rules":
+                severity["explanation"] = (
+                    "A proximity-and-motion rule flagged a possible incident. "
+                    "This is an unverified video warning, not a confirmed collision or severity assessment."
+                )
             source_video_path = selected_video["filename"]
             grouped_event_id = None
             if not event_grouper.is_in_cooldown(source_video_path):
@@ -205,7 +261,9 @@ def create_app():
                 severity["accident_event_id"] = grouped_event_id
                 severity["database_message"] = "Grouped with a recent accident event; no duplicate event was created."
             else:
-                frame_index = classification.get("peak_frame_index", selected_video["frame_count"] // 2)
+                frame_index = classification.get("peak_frame_index")
+                if frame_index is None:
+                    frame_index = selected_video["frame_count"] // 2
                 try:
                     snapshot = capture_accident_snapshot(source_path, frame_index, app.config["SNAPSHOT_FOLDER"])
                     event_description = json.dumps({
@@ -213,7 +271,7 @@ def create_app():
                         "detected_objects": counts,
                         "source_video": {"original_name": selected_video["original_name"], "stored_name": source_video_path},
                         "snapshot_frame_index": snapshot["frame_index"],
-                        "classification": {"accident_probability": classification["accident_probability"], "frames_evaluated": classification["frames_evaluated"]},
+                        "assessment": classification,
                     })
                     # Mark immediately after the snapshot so a temporary MySQL
                     # outage cannot cause continuous duplicate captures.
@@ -234,8 +292,13 @@ def create_app():
                     session["current_accident_event"]["event_id"] = event_id
                     try:
                         alert = generate_alert(
-                            event_id, snapshot["captured_at"], severity["severity"],
-                            "User-uploaded video", snapshot["filename"],
+                            event_id,
+                            classification.get("video_timestamp", "timestamp unavailable"),
+                            severity["severity"],
+                            "User-uploaded video",
+                            snapshot["filename"],
+                            incident_details=classification.get("message", ""),
+                            allow_external_delivery=not app.testing,
                         )
                         session["current_alert"] = {"status": "sent", **alert}
                     except Error as error:
@@ -256,8 +319,33 @@ def create_app():
             session.pop("severity_estimate", None)
             session.pop("current_accident_event", None)
             session.pop("current_alert", None)
-        flash("YOLO detection completed. The annotated video is ready to play.", "success")
+        if classification.get("possible_incident"):
+            if session.get("current_alert"):
+                flash(f"{classification['message']} Dashboard warning logged; no emergency message was sent.", "warning")
+            else:
+                flash(
+                    "A possible incident was flagged, but its event or dashboard warning could not be saved. "
+                    "Check MySQL availability and the database configuration.",
+                    "error",
+                )
+        elif classification.get("status") == "rule_based":
+            flash("YOLO and movement checks completed. No possible incident signal was found; this does not prove the video is accident-free.", "success")
+        else:
+            flash("Analysis completed. No possible incident was flagged.", "success")
         return redirect(url_for("home"))
+
+    @app.route("/analysis-progress/<path:filename>")
+    @login_required
+    def get_analysis_progress(filename):
+        """Return progress for this user's currently selected video only."""
+        selected_video = session.get("uploaded_video", {})
+        if filename != selected_video.get("filename") or Path(filename).name != filename:
+            abort(404)
+        with analysis_progress_lock:
+            state = analysis_progress.get(filename)
+        if state is None:
+            state = {"status": "idle", "progress": 0, "message": "Analysis has not started."}
+        return jsonify(state)
 
     @app.route("/videos/<path:filename>")
     @login_required

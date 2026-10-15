@@ -12,12 +12,20 @@ from typing import Any
 import database as db
 
 
-def build_alert_message(event_id: int, timestamp: str, severity: str, location: str, snapshot_filename: str) -> str:
+def build_alert_message(
+    event_id: int,
+    timestamp: str,
+    severity: str,
+    location: str,
+    snapshot_filename: str,
+    incident_details: str = "",
+) -> str:
     """Create the human-readable dashboard/email alert text."""
     return (
-        f"AI Accident Detection alert — Event #{event_id}. Time: {timestamp}. "
+        f"{incident_details or 'Possible incident — manual review required.'} "
+        f"Event #{event_id}. Video time: {timestamp}. "
         f"Location/source: {location}. Severity: {severity}. "
-        f"Snapshot: {snapshot_filename}. This is an unverified demonstration alert."
+        f"Snapshot: {snapshot_filename}. This is an unverified warning; review the video manually."
     )
 
 
@@ -51,13 +59,24 @@ def send_optional_email(recipient: str, subject: str, body: str) -> tuple[bool, 
         return False, f"Email delivery failed: {error}"
 
 
-def generate_alert(event_id: int, timestamp: str, severity: str, location: str, snapshot_filename: str) -> dict[str, Any]:
-    """Persist dashboard alert, then optionally attempt email for demo contacts."""
-    message = build_alert_message(event_id, timestamp, severity, location, snapshot_filename)
+def generate_alert(
+    event_id: int,
+    timestamp: str,
+    severity: str,
+    location: str,
+    snapshot_filename: str,
+    incident_details: str = "",
+    allow_external_delivery: bool = False,
+) -> dict[str, Any]:
+    """Persist a dashboard warning; external email requires explicit opt-in."""
+    message = build_alert_message(
+        event_id, timestamp, severity, location, snapshot_filename, incident_details
+    )
     dashboard_alert_id = db.create_alert(event_id, None, "dashboard", "sent", message)
     db.log_notification_attempt(dashboard_alert_id, None, "delivered", "dashboard", "Displayed in dashboard")
     email_results = []
-    for contact in db.get_active_email_contacts():
+    contacts = db.get_active_email_contacts() if allow_external_delivery else []
+    for contact in contacts:
         alert_id = db.create_alert(event_id, contact["emergency_contact_id"], "email", "pending", message)
         success, result = send_optional_email(contact["email"], f"AccidentGuard Event #{event_id}", message)
         status = "sent" if success else "failed"

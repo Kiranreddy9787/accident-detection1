@@ -157,7 +157,7 @@ def save_accident_event_from_video(
                 INSERT INTO detection_log (camera_id, model_name, model_version, confidence_score, source_frame_path, notes)
                 VALUES (%s, %s, %s, %s, %s, %s)
                 """,
-                (camera_id, "YOLOv8n + MobileNetV3-Small", "demo", detection_confidence, source_video_path, description),
+                (camera_id, "YOLOv8n + incident assessment", "demo", detection_confidence, source_video_path, description),
             )
             detection_log_id = cursor.lastrowid
             cursor.execute(

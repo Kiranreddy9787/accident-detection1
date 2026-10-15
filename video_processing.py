@@ -3,24 +3,41 @@
 from pathlib import Path
 from typing import Any
 
-import cv2
+try:
+    import cv2
+except ImportError:  # Defer the useful error until video functionality is requested.
+    cv2 = None
 
 
 class VideoProcessingError(ValueError):
     """Raised when OpenCV cannot read a supplied video."""
 
 
+def _require_cv2():
+    global cv2
+    if cv2 is None:
+        try:
+            import cv2 as opencv
+        except ImportError as error:
+            raise VideoProcessingError(
+                "OpenCV is not installed. Run 'python -m pip install opencv-python' and restart the app."
+            ) from error
+        cv2 = opencv
+    return cv2
+
+
 def read_video_metadata(video_path: str | Path) -> dict[str, Any]:
     """Open a video with OpenCV and return basic, non-detection metadata."""
-    capture = cv2.VideoCapture(str(video_path))
+    opencv = _require_cv2()
+    capture = opencv.VideoCapture(str(video_path))
     try:
         if not capture.isOpened():
             raise VideoProcessingError("OpenCV could not open this file as a video.")
 
-        frame_count = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
-        fps = float(capture.get(cv2.CAP_PROP_FPS))
-        width = int(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
-        height = int(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        frame_count = int(capture.get(opencv.CAP_PROP_FRAME_COUNT))
+        fps = float(capture.get(opencv.CAP_PROP_FPS))
+        width = int(capture.get(opencv.CAP_PROP_FRAME_WIDTH))
+        height = int(capture.get(opencv.CAP_PROP_FRAME_HEIGHT))
         if frame_count < 1 or width < 1 or height < 1:
             raise VideoProcessingError("The video has no readable frames.")
 
@@ -54,7 +71,8 @@ def extract_frames(
     read_video_metadata(video_path)  # Validate before writing any frame files.
     destination = Path(output_directory)
     destination.mkdir(parents=True, exist_ok=True)
-    capture = cv2.VideoCapture(str(video_path))
+    opencv = _require_cv2()
+    capture = opencv.VideoCapture(str(video_path))
     saved_frames: list[Path] = []
     frame_number = 0
     try:
@@ -64,7 +82,7 @@ def extract_frames(
                 break
             if frame_number % every_n_frames == 0:
                 frame_path = destination / f"frame_{frame_number:06d}.jpg"
-                if not cv2.imwrite(str(frame_path), frame):
+                if not opencv.imwrite(str(frame_path), frame):
                     raise VideoProcessingError("OpenCV could not write an extracted frame.")
                 saved_frames.append(frame_path)
                 if max_frames is not None and len(saved_frames) >= max_frames:

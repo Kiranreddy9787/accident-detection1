@@ -40,3 +40,4 @@ body { margin: 0; font-family: Inter, Arial, sans-serif; color: var(--navy); bac
 .file-drop { transition: border-color .15s ease, background .15s ease, transform .15s ease; }
 .file-drop:hover, .file-drop.dragging { border-color: #2873cb; background: #eef6ff; transform: translateY(-1px); }
 .detect-form .primary-button:disabled, .auth-button:disabled { cursor: wait; opacity: .72; }
+.upload-progress { margin: 12px 0 4px; } .upload-progress progress { display: block; width: 100%; height: 10px; accent-color: #1462b8; } .upload-progress .selected-file { margin: 7px 0 0; }

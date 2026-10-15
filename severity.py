@@ -20,10 +20,9 @@ def estimate_severity(
     """Return LOW, MEDIUM, or HIGH using explicit normalized video signals.
 
     Score = vehicle evidence (0-30) + person evidence (0-15) + visual incident
-    indicator (0-35) + YOLO confidence (0-20). Vehicle/person figures are
-    detected instances across sampled video frames, not verified unique people
-    or vehicles. ``collision_indicator`` is the CNN accident probability; it is
-    a visual model signal, not proof of a physical collision.
+    indicator (0-35) + YOLO confidence (0-20). Vehicle/person figures are unique
+    tracker estimates, not verified identities. ``collision_indicator`` is a
+    model or movement-rule signal, not proof of a physical collision.
     """
     if vehicle_detections < 0 or person_detections < 0:
         raise ValueError("Detection counts cannot be negative.")
@@ -48,7 +47,7 @@ def estimate_severity(
         },
         "explanation": (
             f"{vehicle_detections} vehicle detections, {person_detections} person detections, "
-            f"CNN incident probability {collision_indicator:.0%}, and mean YOLO confidence "
+            f"incident signal {collision_indicator:.0%}, and mean YOLO confidence "
             f"{detection_confidence:.0%}. This is a demonstration-only video heuristic, not a "
             "medical or official severity assessment."
         ),

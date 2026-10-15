@@ -4,6 +4,9 @@
   const form = document.getElementById("uploadForm");
   const fileDrop = document.getElementById("fileDrop");
   const uploadButton = document.getElementById("uploadButton");
+  const uploadProgress = document.getElementById("uploadProgress");
+  const uploadProgressBar = document.getElementById("uploadProgressBar");
+  const uploadStatus = document.getElementById("uploadStatus");
   const picker = document.getElementById("cameraPicker");
   const openRecorder = document.getElementById("openRecorder");
   const recorderPanel = document.getElementById("cameraRecorder");
@@ -105,9 +108,52 @@
       selectedFile.textContent = "This video is larger than the 500 MB upload limit.";
       return;
     }
+    // Use XHR so large transfers show progress instead of leaving the page
+    // apparently idle until the server finishes validating the video.
+    event.preventDefault();
+    const body = new FormData(form);
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", form.action || window.location.href);
+    uploadProgress.hidden = false;
+    uploadProgressBar.value = 0;
     uploadButton.disabled = true;
     uploadButton.setAttribute("aria-busy", "true");
     uploadButton.firstChild.textContent = "Uploading video… ";
+    uploadStatus.textContent = "Starting upload…";
+    xhr.upload.addEventListener("progress", progressEvent => {
+      if (!progressEvent.lengthComputable) {
+        uploadStatus.textContent = "Uploading video…";
+        return;
+      }
+      const percent = Math.round((progressEvent.loaded / progressEvent.total) * 100);
+      uploadProgressBar.value = percent;
+      uploadStatus.textContent = percent < 100
+        ? `Uploading video… ${percent}%`
+        : "Upload complete. Checking that the video can be read…";
+    });
+    xhr.addEventListener("load", () => {
+      if (xhr.status >= 200 && xhr.status < 400) {
+        window.location.assign(xhr.responseURL || "/");
+        return;
+      }
+      if (xhr.status >= 400 && xhr.status < 500 && xhr.responseURL) {
+        // Let Flask render its validation message (unsupported/corrupt video,
+        // request too large, etc.) as a normal page response.
+        window.location.assign(xhr.responseURL);
+        return;
+      }
+      uploadStatus.textContent = `Upload failed (server error ${xhr.status}). Please try again.`;
+      uploadButton.disabled = false;
+      uploadButton.removeAttribute("aria-busy");
+      uploadButton.firstChild.textContent = "Upload and preview ";
+    });
+    xhr.addEventListener("error", () => {
+      uploadStatus.textContent = "Upload could not reach the server. Check your connection and try again.";
+      uploadButton.disabled = false;
+      uploadButton.removeAttribute("aria-busy");
+      uploadButton.firstChild.textContent = "Upload and preview ";
+    });
+    xhr.send(body);
   });
   window.addEventListener("pagehide", () => stream?.getTracks().forEach(track => track.stop()));
 })();

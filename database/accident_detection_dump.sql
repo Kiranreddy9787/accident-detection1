@@ -284,7 +284,8 @@ CREATE TABLE `users` (
 
 LOCK TABLES `users` WRITE;
 /*!40000 ALTER TABLE `users` DISABLE KEYS */;
-INSERT INTO `users` VALUES (2,'Kiran P','kiran592525@gmail.com','scrypt:32768:8:1$9c1AASYXbkVwDg63$e78c6da9596119c6c9a7e4bbe755ec4f07b8bfa1da88b7911cd8e99253a3cd300ac3df26ae1af0d85256e3849ca2ed11175a045b96258fcf30d9636bb6af107f','admin',1,'2026-09-10 19:08:07','2026-09-10 19:08:07');
+-- Seed no user accounts; create the first admin through the app setup screen.
+
 /*!40000 ALTER TABLE `users` ENABLE KEYS */;
 UNLOCK TABLES;
 
